@@ -389,6 +389,25 @@ func (m *Model) renderScanningView() string {
 	b.WriteString(TitleStyle.Render("🔍 Scanning Filesystem..."))
 	b.WriteString("\n\n")
 
+	// Progress bar based on bytes scanned
+	if m.progress.TotalBytes > 0 {
+		progress := float64(m.progress.BytesScanned) / float64(m.progress.TotalBytes)
+		// Cap at 100% (we might scan more than estimated due to filesystem dynamics)
+		if progress > 1.0 {
+			progress = 1.0
+		}
+		progressBar := m.renderProgressBar(progress, 60)
+		b.WriteString(progressBar)
+		b.WriteString("\n")
+
+		// Show bytes scanned vs total
+		bytesStyle := lipgloss.NewStyle().Faint(true)
+		b.WriteString(bytesStyle.Render(fmt.Sprintf("%s / %s",
+			util.FormatBytes(m.progress.BytesScanned),
+			util.FormatBytes(m.progress.TotalBytes))))
+		b.WriteString("\n\n")
+	}
+
 	// Progress stats
 	statsStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
 	b.WriteString(statsStyle.Render(fmt.Sprintf("Files scanned: %s", formatNumber(m.progress.FilesScanned))))

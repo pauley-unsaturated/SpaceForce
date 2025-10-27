@@ -98,6 +98,17 @@ func (s *Scanner) Scan(ctx context.Context, rootPath string, progressChan chan<-
 		s.startDeviceID = devID
 	}
 
+	// Estimate total bytes by getting filesystem used space
+	// This gives us an approximate maximum for the progress bar
+	totalBytes, err := getFilesystemUsedSpace(absPath)
+	if err != nil {
+		// If we can't get filesystem stats, just set to 0 (progress will be indeterminate)
+		totalBytes = 0
+	}
+	s.mu.Lock()
+	s.progress.TotalBytes = totalBytes
+	s.mu.Unlock()
+
 	// Create root node
 	s.root = NewFileNode(absPath, info.Size(), info.IsDir(), info.ModTime())
 
@@ -180,7 +191,7 @@ func (s *Scanner) scanDirectoryParallel(ctx context.Context, node *FileNode, pro
 			}
 
 			// Update progress (throttled)
-			s.updateProgress(fullPath, progressChan)
+		// (updateProgress moved after info is obtained)
 
 			// Check if we should skip this path (network volume check)
 			if shouldSkip, reason := s.volumeChecker.ShouldSkipPath(fullPath); shouldSkip {
@@ -195,6 +206,9 @@ func (s *Scanner) scanDirectoryParallel(ctx context.Context, node *FileNode, pro
 				s.recordError(fmt.Errorf("cannot stat %s: %w", fullPath, err))
 				continue
 			}
+
+		// Update progress with size (throttled)
+		s.updateProgress(fullPath, info.Size(), progressChan)
 
 			// For directories, check filesystem boundary and duplicate inodes
 			if info.IsDir() {
@@ -278,9 +292,6 @@ func (s *Scanner) scanDirectorySequential(ctx context.Context, node *FileNode, p
 			continue
 		}
 
-		// Update progress (throttled)
-		s.updateProgress(fullPath, progressChan)
-
 		// Check if we should skip this path (network volume check)
 		if shouldSkip, reason := s.volumeChecker.ShouldSkipPath(fullPath); shouldSkip {
 			s.volumesMu.Lock()
@@ -294,6 +305,9 @@ func (s *Scanner) scanDirectorySequential(ctx context.Context, node *FileNode, p
 			s.recordError(fmt.Errorf("cannot stat %s: %w", fullPath, err))
 			continue
 		}
+
+		// Update progress with size (throttled)
+		s.updateProgress(fullPath, info.Size(), progressChan)
 
 		// For directories, check filesystem boundary and duplicate inodes
 		if info.IsDir() {
@@ -329,12 +343,13 @@ func (s *Scanner) scanDirectorySequential(ctx context.Context, node *FileNode, p
 }
 
 // updateProgress updates the scan progress (throttled)
-func (s *Scanner) updateProgress(currentPath string, progressChan chan<- ScanProgress) {
+func (s *Scanner) updateProgress(currentPath string, size int64, progressChan chan<- ScanProgress) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.progress.CurrentPath = currentPath
 	s.progress.FilesScanned++
+	s.progress.BytesScanned += size
 
 	// Only send updates every 100ms to avoid overwhelming the UI
 	now := time.Now().UnixMilli()
@@ -465,6 +480,22 @@ func (s *Scanner) GetProgress() ScanProgress {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return *s.progress
+}
+
+// getFilesystemUsedSpace returns the used space on the filesystem containing the given path
+// This provides an estimate of the maximum bytes we might scan
+func getFilesystemUsedSpace(path string) (int64, error) {
+	var stat syscall.Statfs_t
+	err := syscall.Statfs(path, &stat)
+	if err != nil {
+		return 0, fmt.Errorf("cannot get filesystem stats: %w", err)
+	}
+
+	// Calculate used space = (total blocks - free blocks) * block size
+	usedBlocks := stat.Blocks - stat.Bfree
+	usedBytes := int64(usedBlocks) * int64(stat.Bsize)
+
+	return usedBytes, nil
 }
 
 // CalculateStats computes aggregate statistics for a file tree

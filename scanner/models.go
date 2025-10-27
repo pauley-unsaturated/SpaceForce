@@ -40,6 +40,7 @@ type ScanProgress struct {
 	CurrentPath        string
 	FilesScanned       int64
 	BytesScanned       int64
+	TotalBytes         int64  // Estimated total bytes to scan
 	Errors             []error
 	Complete           bool
 	ICloudFilesSkipped int64 // Count of .icloud placeholder files skipped
