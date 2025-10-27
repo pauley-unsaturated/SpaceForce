@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -66,11 +67,12 @@ type Model struct {
 	showSkippedInfo bool
 
 	// File marking and deletion
-	markedFiles    map[string]*scanner.FileNode // Path -> Node
-	activeModal    ModalType
-	deleteProgress DeleteProgress
-	diskSpaceBefore int64
-	diskSpaceAfter  int64
+	markedFiles             map[string]*scanner.FileNode // Path -> Node
+	activeModal             ModalType
+	deleteProgress          DeleteProgress
+	diskSpaceBefore         int64
+	diskSpaceAfter          int64
+	sensitiveDeleteConfirmed bool // Track if user has confirmed deletion of sensitive paths once
 }
 
 // ScanCompleteMsg is sent when scanning completes
@@ -591,12 +593,31 @@ func (m *Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ModalDeleteConfirm:
 		switch msg.String() {
 		case "y", "Y", "enter":
-			// Start deletion
+			// Check if any marked files require confirmation
+			protector := safety.NewProtector()
+			hasSensitive := false
+			for path := range m.markedFiles {
+				if requiresConf, _ := protector.RequiresConfirmation(path); requiresConf {
+					hasSensitive = true
+					break
+				}
+			}
+
+			// If sensitive paths and not yet confirmed, require second confirmation
+			if hasSensitive && !m.sensitiveDeleteConfirmed {
+				m.sensitiveDeleteConfirmed = true
+				// Stay in confirmation modal, will show updated message
+				return m, nil
+			}
+
+			// Either no sensitive paths, or already confirmed - proceed with deletion
 			m.activeModal = ModalDeleteProgress
+			m.sensitiveDeleteConfirmed = false // Reset for next time
 			return m, m.startDeletion()
 		case "n", "N", "esc", "q":
 			// Cancel
 			m.activeModal = ModalNone
+			m.sensitiveDeleteConfirmed = false // Reset confirmation state
 		}
 	case ModalDeleteSummary:
 		// Any key closes the summary
@@ -674,35 +695,177 @@ func (m *Model) renderModal(background string) string {
 
 // renderDeleteConfirmModal renders the deletion confirmation dialog
 func (m *Model) renderDeleteConfirmModal() string {
-	// Calculate total size
+	// Calculate total size and check for sensitive paths
 	var totalSize int64
-	for _, node := range m.markedFiles {
+	var sensitivePaths []string
+	protector := safety.NewProtector()
+
+	for path, node := range m.markedFiles {
 		totalSize += node.TotalSize()
+		if requiresConf, reason := protector.RequiresConfirmation(path); requiresConf {
+			sensitivePaths = append(sensitivePaths, fmt.Sprintf("%s (%s)", filepath.Base(path), reason))
+		}
 	}
 
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorDanger).
-		Render("⚠️  Confirm Deletion")
+	hasSensitive := len(sensitivePaths) > 0
+
+	// Choose title and color based on sensitivity
+	var title string
+	var borderColor lipgloss.Color
+	if hasSensitive {
+		title = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FF6B6B")).
+			Render("⚠️  CONFIRM DELETION - SENSITIVE PATHS")
+		borderColor = lipgloss.Color("#FF6B6B")
+	} else {
+		title = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(ColorDanger).
+			Render("⚠️  Confirm Deletion")
+		borderColor = ColorDanger
+	}
+
+	// Build message
+	message := fmt.Sprintf(
+		"%s\n\n"+
+			"You are about to delete:\n"+
+			"  • %d file(s) / folder(s)\n"+
+			"  • Total size: %s\n\n",
+		title,
+		len(m.markedFiles),
+		util.FormatBytes(totalSize),
+	)
+
+	// Build tree view of files to be deleted
+	message += "Files to be deleted:\n"
+	treeView := m.buildDeletionTreeView()
+	message += treeView
+
+	// Add sensitive paths warning if any
+	if hasSensitive {
+		message += "\n⚠️  WARNING: Includes sensitive locations:\n"
+		// Show up to 3 examples
+		for i, path := range sensitivePaths {
+			if i >= 3 {
+				message += fmt.Sprintf("  ... and %d more\n", len(sensitivePaths)-3)
+				break
+			}
+			message += fmt.Sprintf("  • %s\n", path)
+		}
+		message += "\nThese paths may contain:\n" +
+			"  - Application data and settings\n" +
+			"  - Credentials and keys\n" +
+			"  - Important configurations\n"
+	}
+
+	message += "\nFiles will be moved to Trash and can be recovered.\n\n"
+
+	if hasSensitive {
+		if m.sensitiveDeleteConfirmed {
+			message += "⚠️  PRESS Y AGAIN TO CONFIRM DELETION ⚠️"
+		} else {
+			message += "Press Y TWICE to confirm, N to cancel"
+		}
+	} else {
+		message += "Press Y to confirm, N to cancel"
+	}
 
 	content := lipgloss.NewStyle().
-		Width(60).
+		Width(80).
 		Padding(1, 2).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorDanger).
-		Render(fmt.Sprintf(
-			"%s\n\n"+
-				"You are about to delete:\n"+
-				"  • %d file(s) / folder(s)\n"+
-				"  • Total size: %s\n\n"+
-				"Files will be moved to Trash and can be recovered.\n\n"+
-				"Press Y to confirm, N to cancel",
-			title,
-			len(m.markedFiles),
-			util.FormatBytes(totalSize),
-		))
+		BorderForeground(borderColor).
+		Render(message)
 
 	return content
+}
+
+// buildDeletionTreeView creates a tree view of files to be deleted
+func (m *Model) buildDeletionTreeView() string {
+	if len(m.markedFiles) == 0 {
+		return "  (none)\n"
+	}
+
+	// Group files by parent directory for better display
+	type DirGroup struct {
+		dir   string
+		files []string
+	}
+
+	dirMap := make(map[string][]string)
+
+	for path := range m.markedFiles {
+		dir := filepath.Dir(path)
+		base := filepath.Base(path)
+		dirMap[dir] = append(dirMap[dir], base)
+	}
+
+	var result strings.Builder
+	maxLines := 12 // Show max 12 lines to keep modal from getting too tall
+	lineCount := 0
+	totalFiles := len(m.markedFiles)
+
+	// Sort directories for consistent display
+	dirs := make([]string, 0, len(dirMap))
+	for dir := range dirMap {
+		dirs = append(dirs, dir)
+	}
+
+	// Simple sort
+	for i := 0; i < len(dirs); i++ {
+		for j := i + 1; j < len(dirs); j++ {
+			if dirs[i] > dirs[j] {
+				dirs[i], dirs[j] = dirs[j], dirs[i]
+			}
+		}
+	}
+
+	for _, dir := range dirs {
+		files := dirMap[dir]
+
+		if lineCount >= maxLines {
+			remaining := totalFiles - lineCount
+			if remaining > 0 {
+				result.WriteString(fmt.Sprintf("  ... and %d more file(s)\n", remaining))
+			}
+			break
+		}
+
+		// Show directory (abbreviated if too long)
+		displayDir := dir
+		if len(displayDir) > 60 {
+			displayDir = "..." + displayDir[len(displayDir)-57:]
+		}
+
+		result.WriteString(fmt.Sprintf("  📁 %s\n", displayDir))
+		lineCount++
+
+		// Show files under this directory
+		for i, file := range files {
+			if lineCount >= maxLines {
+				remaining := totalFiles - lineCount
+				result.WriteString(fmt.Sprintf("     ... and %d more\n", remaining))
+				break
+			}
+
+			// Truncate filename if too long
+			displayFile := file
+			if len(displayFile) > 55 {
+				displayFile = displayFile[:52] + "..."
+			}
+
+			// Use tree characters
+			if i == len(files)-1 {
+				result.WriteString(fmt.Sprintf("     └─ %s\n", displayFile))
+			} else {
+				result.WriteString(fmt.Sprintf("     ├─ %s\n", displayFile))
+			}
+			lineCount++
+		}
+	}
+
+	return result.String()
 }
 
 // renderDeleteProgressModal renders the deletion progress dialog

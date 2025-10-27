@@ -8,80 +8,58 @@ import (
 
 // Protector handles safety checks for file operations
 type Protector struct {
-	protectedPaths []string
-	protectedExts  []string
+	absolutelyProtectedPaths []string
+	sensitivePaths           []string
+	protectedExts            []string
 }
 
 // NewProtector creates a new protector with macOS default protections
 func NewProtector() *Protector {
 	return &Protector{
-		protectedPaths: getProtectedPaths(),
-		protectedExts:  getProtectedExtensions(),
+		absolutelyProtectedPaths: getAbsolutelyProtectedPaths(),
+		sensitivePaths:           getSensitivePaths(),
+		protectedExts:            getProtectedExtensions(),
 	}
 }
 
 // IsSafeToDelete checks if a file/directory is safe to delete
+// This only blocks ABSOLUTELY PROTECTED paths (system files)
+// For sensitive paths that require confirmation, use RequiresConfirmation
 func (p *Protector) IsSafeToDelete(path string) (bool, string) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return false, "Cannot determine absolute path"
 	}
 
-	// Check if it's a protected system path
-	for _, protectedPath := range p.protectedPaths {
-		if strings.HasPrefix(absPath, protectedPath) {
-			return false, "System path - critical for macOS operation"
-		}
-		if absPath == protectedPath {
+	// Check if it's an absolutely protected system path
+	for _, protectedPath := range p.absolutelyProtectedPaths {
+		// Exact match or everything under it
+		if absPath == protectedPath || strings.HasPrefix(absPath, protectedPath+"/") {
 			return false, "System path - critical for macOS operation"
 		}
 	}
 
-	// Check if it's an application bundle
+	// Check if it's an application bundle in /System
 	if strings.HasSuffix(absPath, ".app") {
-		// Apps in /Applications are generally safe to delete
-		// But system apps in /System/Applications are not
-		if strings.HasPrefix(absPath, "/System/Applications") {
+		// System apps in /System/Applications cannot be deleted
+		if strings.HasPrefix(absPath, "/System/Applications") || strings.HasPrefix(absPath, "/System/Library") {
 			return false, "System application - built-in macOS app"
 		}
-		return true, "Application (can be reinstalled)"
+		// User/third-party apps are OK
+		return true, "Application"
 	}
 
-	// Check for protected extensions
+	// Check for protected extensions (system libraries, kernel extensions)
 	ext := filepath.Ext(absPath)
 	for _, protectedExt := range p.protectedExts {
 		if ext == protectedExt {
-			return false, "Protected file type - may be system critical"
-		}
-	}
-
-	// Check if it's in user directory
-	homeDir, _ := os.UserHomeDir()
-
-	// Protect the home directory itself
-	if absPath == homeDir {
-		return false, "Home directory - deleting this would destroy all user data"
-	}
-
-	if strings.HasPrefix(absPath, homeDir) {
-		// User files are generally safe, but check for critical directories
-		criticalUserDirs := []string{
-			filepath.Join(homeDir, "Library"),           // Entire Library folder
-			filepath.Join(homeDir, ".ssh"),              // SSH keys
-			filepath.Join(homeDir, ".gnupg"),            // GPG keys
-			filepath.Join(homeDir, ".aws"),              // AWS credentials
-			filepath.Join(homeDir, ".config"),           // Config files
-			filepath.Join(homeDir, ".kube"),             // Kubernetes config
-			filepath.Join(homeDir, ".docker"),           // Docker config
-		}
-
-		for _, criticalDir := range criticalUserDirs {
-			if absPath == criticalDir || strings.HasPrefix(absPath, criticalDir+"/") {
-				return false, "Critical user data - may contain credentials, settings, or system config"
+			// Only protect these extensions if they're in system locations
+			if strings.HasPrefix(absPath, "/System") ||
+			   strings.HasPrefix(absPath, "/Library") ||
+			   strings.HasPrefix(absPath, "/usr") {
+				return false, "System file type - critical for macOS"
 			}
 		}
-
-		return true, "User file - safe to delete"
 	}
 
 	// Check if path exists and is writable
@@ -95,13 +73,67 @@ func (p *Protector) IsSafeToDelete(path string) (bool, string) {
 		return false, "Read-only file - may be protected"
 	}
 
-	// For paths outside user directory, be conservative
-	if strings.HasPrefix(absPath, "/usr/local") ||
-	   strings.HasPrefix(absPath, "/opt") {
-		return true, "Third-party software location - generally safe"
+	// Everything else is safe to delete (though may require confirmation)
+	homeDir, _ := os.UserHomeDir()
+	if strings.HasPrefix(absPath, homeDir) {
+		return true, "User file"
 	}
 
-	return false, "Unknown location - defaulting to safe mode"
+	// Third-party software locations
+	if strings.HasPrefix(absPath, "/usr/local") || strings.HasPrefix(absPath, "/opt") {
+		return true, "Third-party software"
+	}
+
+	// Conservative for unknown locations
+	return false, "Unknown location - defaulting to protected"
+}
+
+// RequiresConfirmation checks if deleting a path requires extra user confirmation
+// These are sensitive areas like ~/Library, credentials, etc.
+func (p *Protector) RequiresConfirmation(path string) (bool, string) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false, ""
+	}
+
+	// Check if it's in a sensitive path
+	for _, sensitivePath := range p.sensitivePaths {
+		// Exact match
+		if absPath == sensitivePath {
+			return true, "This is a critical user directory"
+		}
+		// Anything under a sensitive path also requires confirmation
+		if strings.HasPrefix(absPath, sensitivePath+"/") {
+			// But get more specific reason based on the path
+			if strings.Contains(absPath, "Library/Application Support") {
+				return true, "Application data - may contain important settings or data"
+			}
+			if strings.Contains(absPath, "Library/Preferences") {
+				return true, "Application preferences - may contain important settings"
+			}
+			if strings.Contains(absPath, "Library/Containers") || strings.Contains(absPath, "Library/Group Containers") {
+				return true, "Sandboxed app data - may contain important app data"
+			}
+			if strings.Contains(absPath, ".ssh") {
+				return true, "SSH keys and configuration - critical for authentication"
+			}
+			if strings.Contains(absPath, ".gnupg") {
+				return true, "GPG keys - critical for encryption and signing"
+			}
+			if strings.Contains(absPath, ".aws") || strings.Contains(absPath, ".kube") {
+				return true, "Cloud/cluster credentials - critical for infrastructure access"
+			}
+			if strings.Contains(absPath, "Documents") {
+				return true, "Personal documents directory"
+			}
+			if strings.Contains(absPath, "Desktop") {
+				return true, "Desktop items - may contain active work"
+			}
+			return true, "Sensitive user directory"
+		}
+	}
+
+	return false, ""
 }
 
 // GetRiskLevel returns a risk level for deleting a path (0-3)

@@ -1,9 +1,15 @@
 package safety
 
-// getProtectedPaths returns a list of macOS system paths that should never be deleted
-func getProtectedPaths() []string {
+import (
+	"os"
+	"path/filepath"
+)
+
+// getAbsolutelyProtectedPaths returns paths that CANNOT be deleted under any circumstances
+// These are critical system paths that would break macOS if deleted
+func getAbsolutelyProtectedPaths() []string {
 	return []string{
-		// Core system directories
+		// Core system directories - absolutely protected
 		"/System",
 		"/bin",
 		"/sbin",
@@ -16,40 +22,50 @@ func getProtectedPaths() []string {
 		"/etc",
 		"/dev",
 		"/cores",
-
-		// macOS specific
-		"/Library/Apple",
-		"/Library/Audio",
-		"/Library/ColorPickers",
-		"/Library/CoreMediaIO",
-		"/Library/Extensions",
-		"/Library/Filesystems",
-		"/Library/Frameworks",
-		"/Library/Internet Plug-Ins",
-		"/Library/Java",
-		"/Library/Keyboard Layouts",
-		"/Library/LaunchAgents",
-		"/Library/LaunchDaemons",
-		"/Library/Modem Scripts",
-		"/Library/Perl",
-		"/Library/Printers",
-		"/Library/PrivilegedHelperTools",
-		"/Library/Python",
-		"/Library/QuickTime",
-		"/Library/Ruby",
-		"/Library/ScriptingAdditions",
-		"/Library/Security",
-		"/Library/Spotlight",
-		"/Library/SystemExtensions",
-
-		// Applications
-		"/System/Applications",
-		"/System/Library",
+		"/Applications", // System Applications directory itself
+		"/Users",        // Users directory itself (not contents)
+		"/Library",      // System Library (everything under /Library)
 
 		// Volumes (to prevent accidental deletion of mounted drives)
 		"/Volumes/Macintosh HD",
 		"/Volumes/Recovery",
 	}
+}
+
+// getSensitivePaths returns paths that require explicit user confirmation to delete
+// These are important user data/config locations but CAN be deleted if user confirms
+func getSensitivePaths() []string {
+	homeDir, _ := os.UserHomeDir()
+
+	return []string{
+		// Home directory itself (but not contents)
+		homeDir,
+
+		// User Library and important subdirectories - require confirmation
+		filepath.Join(homeDir, "Library"),
+		filepath.Join(homeDir, "Library/Application Support"),
+		filepath.Join(homeDir, "Library/Preferences"),
+		filepath.Join(homeDir, "Library/Containers"),
+		filepath.Join(homeDir, "Library/Group Containers"),
+
+		// Credential and configuration directories
+		filepath.Join(homeDir, ".ssh"),
+		filepath.Join(homeDir, ".gnupg"),
+		filepath.Join(homeDir, ".aws"),
+		filepath.Join(homeDir, ".config"),
+		filepath.Join(homeDir, ".kube"),
+		filepath.Join(homeDir, ".docker"),
+
+		// Important user folders
+		filepath.Join(homeDir, "Documents"),
+		filepath.Join(homeDir, "Desktop"),
+	}
+}
+
+// getProtectedPaths is deprecated - keeping for backward compatibility
+// Use getAbsolutelyProtectedPaths instead
+func getProtectedPaths() []string {
+	return getAbsolutelyProtectedPaths()
 }
 
 // getProtectedExtensions returns file extensions that should be protected
