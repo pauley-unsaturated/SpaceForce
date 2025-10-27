@@ -22,8 +22,6 @@ func getAbsolutelyProtectedPaths() []string {
 		"/etc",
 		"/dev",
 		"/cores",
-		"/Applications", // System Applications directory itself
-		"/Users",        // Users directory itself (not contents)
 		"/Library",      // System Library (everything under /Library)
 
 		// Volumes (to prevent accidental deletion of mounted drives)

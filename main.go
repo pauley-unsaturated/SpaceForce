@@ -37,6 +37,25 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Safety check: prevent running as root
+	if os.Getuid() == 0 {
+		fmt.Println("╔════════════════════════════════════════════════════════════════════╗")
+		fmt.Println("║                           ⚠️  WARNING ⚠️                            ║")
+		fmt.Println("║                                                                    ║")
+		fmt.Println("║  SpaceForce is running as root (UID 0)                             ║")
+		fmt.Println("║                                                                    ║")
+		fmt.Println("║  Running this program as root is EXTREMELY DANGEROUS because:      ║")
+		fmt.Println("║  • You can delete critical system files that would break macOS     ║")
+		fmt.Println("║  • Permission checks won't protect you (root bypasses them)        ║")
+		fmt.Println("║  • A single mistake could render your system unbootable            ║")
+		fmt.Println("║                                                                    ║")
+		fmt.Println("║  Please run SpaceForce as a normal user instead.                   ║")
+		fmt.Println("║                                                                    ║")
+		fmt.Println("╚════════════════════════════════════════════════════════════════════╝")
+		fmt.Println()
+		os.Exit(1)
+	}
+
 	// Validate path
 	if *scanPath == "" {
 		fmt.Println("Error: path cannot be empty")

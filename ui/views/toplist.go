@@ -56,6 +56,16 @@ func (tlv *TopListView) Update(msg tea.Msg) (*TopListView, tea.Cmd) {
 			if tlv.selectedIndex < len(tlv.items)-1 {
 				tlv.selectedIndex++
 			}
+		case "enter", "return":
+			// Jump to tree view with selected item
+			if tlv.selectedIndex < len(tlv.items) {
+				selectedNode := tlv.items[tlv.selectedIndex]
+				// Return a message with the path encoded as a special string
+				// Format: "JUMP_TO_TREE:<path>"
+				return tlv, func() tea.Msg {
+					return "JUMP_TO_TREE:" + selectedNode.Path
+				}
+			}
 		case "s":
 			// Toggle sort mode
 			switch tlv.sortMode {

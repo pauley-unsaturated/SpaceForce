@@ -36,12 +36,13 @@ const (
 
 // DeleteProgress tracks deletion operation progress
 type DeleteProgress struct {
-	Current       int
-	Total         int
-	CurrentFile   string
-	BytesDeleted  int64
-	FilesDeleted  int
-	Errors        []error
+	Current           int
+	Total             int
+	CurrentFile       string
+	BytesDeleted      int64
+	FilesDeleted      int   // Top-level items deleted
+	TotalFilesDeleted int   // Total files including those in deleted directories
+	Errors            []error
 }
 
 // Model is the main application model
@@ -84,6 +85,11 @@ type ScanCompleteMsg struct {
 
 // ScanProgressMsg is sent during scanning
 type ScanProgressMsg scanner.ScanProgress
+
+// JumpToTreeViewMsg is sent when we want to switch to tree view and select a specific node
+type JumpToTreeViewMsg struct {
+	Path string
+}
 
 // NewModel creates a new application model
 func NewModel(rootPath string) *Model {
@@ -169,6 +175,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.currentView = (m.currentView + 1) % 5
 
+		case "shift+tab":
+			// Navigate tabs in reverse
+			m.currentView = (m.currentView - 1 + 5) % 5
+
 		case "m":
 			// Mark/unmark current file
 			if !m.scanning {
@@ -232,13 +242,76 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DeleteCompleteMsg:
 		// Store deletion results
-		m.deleteProgress.FilesDeleted = msg.FilesDeleted
+		m.deleteProgress.FilesDeleted = msg.ItemsDeleted
+		m.deleteProgress.TotalFilesDeleted = msg.TotalFilesDeleted
 		m.deleteProgress.BytesDeleted = msg.BytesDeleted
 		m.deleteProgress.Errors = msg.Errors
+
+		// Remove deleted nodes from the tree
+		for _, path := range msg.DeletedPaths {
+			m.removeNodeFromTree(path)
+		}
+
+		// Rebuild all views with updated tree
+		if m.root != nil {
+			m.treeView = views.NewTreeView(m.root)
+			m.topListView = views.NewTopListView(m.root)
+			m.breakdownView = views.NewBreakdownView(m.root)
+			m.timelineView = views.NewTimelineView(m.root)
+
+			// Set dimensions for all views
+			viewHeight := m.height - 8
+			if viewHeight < 5 {
+				viewHeight = 5
+			}
+
+			m.treeView.SetHeight(viewHeight)
+			m.treeView.SetWidth(m.width)
+			m.topListView.SetHeight(viewHeight)
+			m.breakdownView.SetHeight(viewHeight)
+			m.timelineView.SetHeight(viewHeight)
+
+			// Restore marked files (but remove deleted ones)
+			remainingMarked := make(map[string]*scanner.FileNode)
+			for path, node := range m.markedFiles {
+				// Check if this path was deleted
+				wasDeleted := false
+				for _, deletedPath := range msg.DeletedPaths {
+					if path == deletedPath {
+						wasDeleted = true
+						break
+					}
+				}
+				if !wasDeleted {
+					remainingMarked[path] = node
+				}
+			}
+			m.markedFiles = remainingMarked
+			m.updateMarkedFilesInViews()
+		}
 
 		// Show summary modal
 		m.activeModal = ModalDeleteSummary
 		return m, nil
+
+	case JumpToTreeViewMsg:
+		// Switch to tree view and select the specified node
+		m.currentView = ViewTree
+		if m.treeView != nil {
+			m.treeView.SelectAndExpandToNode(msg.Path)
+		}
+		return m, nil
+
+	default:
+		// Handle string-based messages from views (to avoid import cycles)
+		if strMsg, ok := msg.(string); ok && strings.HasPrefix(strMsg, "JUMP_TO_TREE:") {
+			path := strings.TrimPrefix(strMsg, "JUMP_TO_TREE:")
+			m.currentView = ViewTree
+			if m.treeView != nil {
+				m.treeView.SelectAndExpandToNode(path)
+			}
+			return m, nil
+		}
 	}
 
 	return m, nil
@@ -326,7 +399,17 @@ func (m *Model) View() string {
 		b.WriteString(m.renderSkippedInfo())
 	}
 
-	return b.String()
+	// Pad remaining height with empty lines to clear any artifacts from resizing
+	content := b.String()
+	contentLines := strings.Count(content, "\n")
+	if contentLines < m.height-1 {
+		// Add empty lines to fill the rest of the terminal
+		for i := contentLines; i < m.height-1; i++ {
+			content += "\n"
+		}
+	}
+
+	return content
 }
 
 // renderTabs renders the tab navigation
@@ -454,7 +537,17 @@ func (m *Model) renderScanningView() string {
 	b.WriteString("\n\n")
 	b.WriteString(HelpStyle.Render("Tip: Large scans can take several minutes • Press 'q' to cancel"))
 
-	return b.String()
+	// Pad remaining height with empty lines to clear any artifacts from resizing
+	content := b.String()
+	contentLines := strings.Count(content, "\n")
+	if contentLines < m.height-1 {
+		// Add empty lines to fill the rest of the terminal
+		for i := contentLines; i < m.height-1; i++ {
+			content += "\n"
+		}
+	}
+
+	return content
 }
 
 // formatNumber formats a number with thousand separators
@@ -477,9 +570,20 @@ func formatNumber(n int64) string {
 
 // renderError renders an error message
 func (m *Model) renderError() string {
-	return lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Foreground(ColorDanger).
 		Render(fmt.Sprintf("Error: %v", m.err))
+
+	// Pad remaining height with empty lines to clear any artifacts from resizing
+	contentLines := strings.Count(content, "\n")
+	if contentLines < m.height-1 {
+		// Add empty lines to fill the rest of the terminal
+		for i := contentLines; i < m.height-1; i++ {
+			content += "\n"
+		}
+	}
+
+	return content
 }
 
 // renderSkippedInfo renders information about skipped network volumes
@@ -510,7 +614,7 @@ func (m *Model) renderSkippedInfo() string {
 // renderHelp renders help text
 func (m *Model) renderHelp() string {
 	helps := []string{
-		"tab: switch view",
+		"tab/shift+tab: switch view",
 		"1-5: jump to view",
 		"↑↓/jk: navigate",
 		"q: quit",
@@ -521,7 +625,7 @@ func (m *Model) renderHelp() string {
 	case ViewTree:
 		helps = append(helps, "enter/space: expand/collapse", "←→/hl: expand/collapse", "s: change sort", "z: zoom in", "u: zoom out")
 	case ViewTopList:
-		helps = append(helps, "s: change sort", "f: toggle files", "d: toggle dirs")
+		helps = append(helps, "enter: jump to tree", "s: change sort", "f: toggle files", "d: toggle dirs")
 	}
 
 	// Add marking/deletion help if files are marked
@@ -587,6 +691,39 @@ func (m *Model) getCurrentNode() *scanner.FileNode {
 	return nil
 }
 
+// removeNodeFromTree removes a node from the tree by path
+func (m *Model) removeNodeFromTree(targetPath string) {
+	if m.root == nil {
+		return
+	}
+
+	// If we're deleting the root itself, clear everything
+	if m.root.Path == targetPath {
+		m.root = nil
+		return
+	}
+
+	// Find and remove the node
+	m.removeNodeRecursive(m.root, targetPath)
+}
+
+// removeNodeRecursive recursively finds and removes a node from the tree
+func (m *Model) removeNodeRecursive(parent *scanner.FileNode, targetPath string) bool {
+	for i, child := range parent.Children {
+		if child.Path == targetPath {
+			// Remove this child
+			parent.Children = append(parent.Children[:i], parent.Children[i+1:]...)
+			return true
+		}
+
+		// Recursively search in this child's children
+		if m.removeNodeRecursive(child, targetPath) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleModalInput handles keyboard input when a modal is active
 func (m *Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.activeModal {
@@ -627,43 +764,71 @@ func (m *Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// DeleteProgressUpdateMsg is sent during deletion to update progress
+type DeleteProgressUpdateMsg struct {
+	Current     int
+	Total       int
+	CurrentFile string
+}
+
 // startDeletion initiates the deletion process
 func (m *Model) startDeletion() tea.Cmd {
+	// Store marked files for deletion
+	filesToDelete := make(map[string]*scanner.FileNode)
+	for k, v := range m.markedFiles {
+		filesToDelete[k] = v
+	}
+
 	return func() tea.Msg {
 		deleter := safety.NewDeleter(safety.DeleteToTrash)
 
 		// Initialize progress
 		current := 0
+		itemsDeleted := 0
+		totalFilesDeleted := 0
 		var totalBytesDeleted int64
 		errors := make([]error, 0)
+		deletedPaths := make([]string, 0)
 
-		// Delete each file
-		for path := range m.markedFiles {
+		// Delete each file/directory
+		for path, node := range filesToDelete {
 			current++
 
-			// Send progress update
-			// (In a real implementation, you'd use a channel to send updates)
+			// Count total files in this item (if it's a directory, count all files inside)
+			fileCount := int(node.FileCount())
+
+			// Delete the file/directory
 			bytesDeleted, err := deleter.DeleteFile(path)
 			if err != nil {
 				errors = append(errors, fmt.Errorf("%s: %w", path, err))
 			} else {
+				itemsDeleted++
+				totalFilesDeleted += fileCount
 				totalBytesDeleted += bytesDeleted
+				deletedPaths = append(deletedPaths, path)
 			}
+
+			// Note: We can't send progress updates from within this function easily
+			// in Bubble Tea's model, but the deletion itself is now more reliable
 		}
 
 		return DeleteCompleteMsg{
-			FilesDeleted: current - len(errors),
-			BytesDeleted: totalBytesDeleted,
-			Errors:       errors,
+			ItemsDeleted:      itemsDeleted,
+			TotalFilesDeleted: totalFilesDeleted,
+			BytesDeleted:      totalBytesDeleted,
+			Errors:            errors,
+			DeletedPaths:      deletedPaths,
 		}
 	}
 }
 
 // DeleteCompleteMsg is sent when deletion completes
 type DeleteCompleteMsg struct {
-	FilesDeleted int
-	BytesDeleted int64
-	Errors       []error
+	ItemsDeleted     int     // Top-level items (files/directories)
+	TotalFilesDeleted int     // Total files including those in deleted directories
+	BytesDeleted     int64
+	Errors           []error
+	DeletedPaths     []string // Paths that were deleted (for tree update)
 }
 
 // renderModal renders a modal dialog overlay
@@ -759,16 +924,17 @@ func (m *Model) renderDeleteConfirmModal() string {
 			"  - Important configurations\n"
 	}
 
-	message += "\nFiles will be moved to Trash and can be recovered.\n\n"
+	message += "\n⚠️  FILES WILL BE PERMANENTLY DELETED ⚠️\n"
+	message += "This action cannot be undone.\n\n"
 
 	if hasSensitive {
 		if m.sensitiveDeleteConfirmed {
-			message += "⚠️  PRESS Y AGAIN TO CONFIRM DELETION ⚠️"
+			message += "⚠️  PRESS Y AGAIN TO PERMANENTLY DELETE ⚠️"
 		} else {
-			message += "Press Y TWICE to confirm, N to cancel"
+			message += "Press Y TWICE to confirm permanent deletion, N to cancel"
 		}
 	} else {
-		message += "Press Y to confirm, N to cancel"
+		message += "Press Y to confirm permanent deletion, N to cancel"
 	}
 
 	content := lipgloss.NewStyle().
@@ -900,6 +1066,46 @@ func (m *Model) renderDeleteProgressModal() string {
 
 // renderDeleteSummaryModal renders the deletion summary dialog
 func (m *Model) renderDeleteSummaryModal() string {
+	// Show errors if any
+	if len(m.deleteProgress.Errors) > 0 {
+		title := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(ColorDanger).
+			Render("⚠ Deletion Errors")
+
+		var errorList strings.Builder
+		for i, err := range m.deleteProgress.Errors {
+			if i < 5 { // Show first 5 errors
+				errorList.WriteString(fmt.Sprintf("  • %s\n", err.Error()))
+			}
+		}
+		if len(m.deleteProgress.Errors) > 5 {
+			errorList.WriteString(fmt.Sprintf("  ... and %d more errors\n", len(m.deleteProgress.Errors)-5))
+		}
+
+		message := fmt.Sprintf(
+			"%s\n\n"+
+				"Errors occurred during deletion:\n\n"+
+				"%s\n"+
+				"Successfully deleted: %d item(s)\n"+
+				"Space reclaimed: %s\n\n"+
+				"Press any key to continue",
+			title,
+			errorList.String(),
+			m.deleteProgress.FilesDeleted,
+			util.FormatBytes(m.deleteProgress.BytesDeleted),
+		)
+
+		content := lipgloss.NewStyle().
+			Width(70).
+			Padding(1, 2).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorDanger).
+			Render(message)
+
+		return content
+	}
+
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorSuccess).
@@ -907,12 +1113,25 @@ func (m *Model) renderDeleteSummaryModal() string {
 
 	spaceReclaimed := util.FormatBytes(m.deleteProgress.BytesDeleted)
 
-	content := lipgloss.NewStyle().
-		Width(60).
-		Padding(1, 2).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorSuccess).
-		Render(fmt.Sprintf(
+	// Build message with appropriate details
+	var message string
+	if m.deleteProgress.TotalFilesDeleted > m.deleteProgress.FilesDeleted {
+		// Directories were deleted - show both counts
+		message = fmt.Sprintf(
+			"%s\n\n"+
+				"Successfully deleted:\n"+
+				"  • %d item(s) (files and/or directories)\n"+
+				"  • %d total file(s) inside\n"+
+				"  • Space reclaimed: %s\n\n"+
+				"Press any key to continue",
+			title,
+			m.deleteProgress.FilesDeleted,
+			m.deleteProgress.TotalFilesDeleted,
+			spaceReclaimed,
+		)
+	} else {
+		// Only files deleted
+		message = fmt.Sprintf(
 			"%s\n\n"+
 				"Successfully deleted:\n"+
 				"  • %d file(s)\n"+
@@ -921,7 +1140,15 @@ func (m *Model) renderDeleteSummaryModal() string {
 			title,
 			m.deleteProgress.FilesDeleted,
 			spaceReclaimed,
-		))
+		)
+	}
+
+	content := lipgloss.NewStyle().
+		Width(60).
+		Padding(1, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSuccess).
+		Render(message)
 
 	return content
 }

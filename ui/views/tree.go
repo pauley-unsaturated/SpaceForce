@@ -417,3 +417,53 @@ func (tv *TreeView) GetSelectedNode() *scanner.FileNode {
 	}
 	return nil
 }
+
+// SelectAndExpandToNode expands all parent directories and selects the given node
+func (tv *TreeView) SelectAndExpandToNode(targetPath string) {
+	// First, expand all parent directories
+	tv.expandPathToNode(targetPath)
+
+	// Rebuild visible items with new expansions
+	tv.rebuildVisibleItems()
+
+	// Find and select the target node in visible items
+	for i, item := range tv.visibleItems {
+		if item.node.Path == targetPath {
+			tv.selectedIndex = i
+			break
+		}
+	}
+}
+
+// expandPathToNode expands all directories in the path to the target node
+func (tv *TreeView) expandPathToNode(targetPath string) {
+	// Walk up from the target to the root, expanding each directory
+	current := tv.findNodeByPath(tv.displayRoot, targetPath)
+	if current == nil {
+		return
+	}
+
+	// Expand all parents by walking up the tree
+	node := current
+	for node != nil {
+		if node.Parent != nil {
+			tv.expandedDirs[node.Parent.Path] = true
+		}
+		node = node.Parent
+	}
+}
+
+// findNodeByPath finds a node by its path in the tree
+func (tv *TreeView) findNodeByPath(root *scanner.FileNode, targetPath string) *scanner.FileNode {
+	if root.Path == targetPath {
+		return root
+	}
+
+	for _, child := range root.Children {
+		if found := tv.findNodeByPath(child, targetPath); found != nil {
+			return found
+		}
+	}
+
+	return nil
+}

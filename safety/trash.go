@@ -3,7 +3,6 @@ package safety
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -64,7 +63,7 @@ func (d *Deleter) DeleteFile(path string) (int64, error) {
 	return size, nil
 }
 
-// moveToTrash moves a file to the macOS Trash using osascript
+// moveToTrash permanently deletes a file (we use strong confirmation dialogs instead)
 func (d *Deleter) moveToTrash(path string) error {
 	// Convert to absolute path
 	absPath, err := filepath.Abs(path)
@@ -72,18 +71,10 @@ func (d *Deleter) moveToTrash(path string) error {
 		return fmt.Errorf("cannot get absolute path: %w", err)
 	}
 
-	// Use osascript to move to Trash (works on macOS)
-	// This uses Finder's trash functionality which is the safest method
-	script := fmt.Sprintf(`
-		tell application "Finder"
-			move POSIX file "%s" to trash
-		end tell
-	`, absPath)
-
-	cmd := exec.Command("osascript", "-e", script)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to move to trash: %w (output: %s)", err, string(output))
+	// Just use os.RemoveAll - it's fast, simple, and works across filesystems
+	// We have strong confirmation dialogs (including double-confirm for sensitive paths)
+	if err := os.RemoveAll(absPath); err != nil {
+		return fmt.Errorf("failed to delete: %w", err)
 	}
 
 	return nil
